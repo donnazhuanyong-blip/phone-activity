@@ -1,0 +1,129 @@
+import os
+import sqlite3
+from datetime import datetime, timezone, timedelta
+from flask import Flask, request, jsonify
+
+app = Flask(__name__)
+CST = timezone(timedelta(hours=8))
+EXPECTED_TOKEN = os.environ.get("REPORT_TOKEN", "")
+DB_PATH = os.environ.get("DATA_DIR", "/tmp") + "/activity.db"
+
+
+def get_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS phone_activity (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_name TEXT NOT NULL,
+            opened_at TEXT NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS debug_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            info TEXT,
+            ts TEXT
+        )
+    """)
+    return conn
+
+
+def require_token():
+    if not EXPECTED_TOKEN:
+        return None
+    auth = request.headers.get("Authorization", "")
+    token = auth.replace("Bearer ", "").strip()
+    if token != EXPECTED_TOKEN:
+        return jsonify({"error": "unauthorized"}), 401
+    return None
+
+
+@app.route("/debug", methods=["GET", "POST"])
+def debug():
+    err = require_token()
+    if err:
+        return err
+    if request.method == "GET":
+        conn = get_db()
+        rows = conn.execute("SELECT info, ts FROM debug_log ORDER BY ts DESC LIMIT 5").fetchall()
+        conn.close()
+        return jsonify([{"info": r["info"], "ts": r["ts"]} for r in rows])
+    import json as _json
+    info = _json.dumps({
+        "content_type": request.content_type,
+        "json": request.get_json(silent=True),
+        "form": dict(request.form),
+        "data": request.get_data(as_text=True),
+    })
+    now = datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S")
+    conn = get_db()
+    conn.execute("INSERT INTO debug_log (info, ts) VALUES (?, ?)", (info, now))
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "saved"})
+
+
+@app.route("/report", methods=["POST"])
+def report():
+    err = require_token()
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    app_name = data.get("app_name") or data.get("app") or str(data) if data else "unknown"
+    if app_name == "{}" or not app_name:
+        app_name = request.get_data(as_text=True) or "unknown"
+    now = datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S")
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO phone_activity (app_name, opened_at) VALUES (?, ?)",
+        (app_name, now),
+    )
+    conn.execute("""
+        DELETE FROM phone_activity
+        WHERE id NOT IN (
+            SELECT id FROM phone_activity ORDER BY opened_at DESC LIMIT 100
+        )
+    """)
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "ok"})
+
+
+@app.route("/activity", methods=["GET"])
+def activity():
+    err = require_token()
+    if err:
+        return err
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT app_name, opened_at FROM phone_activity ORDER BY opened_at DESC LIMIT 50"
+    ).fetchall()
+    conn.close()
+    return jsonify([{"app": r["app_name"], "time": r["opened_at"]} for r in rows])
+
+
+@app.route("/activity/summary", methods=["GET"])
+def activity_summary():
+    err = require_token()
+    if err:
+        return err
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT app_name, opened_at FROM phone_activity ORDER BY opened_at DESC LIMIT 50"
+    ).fetchall()
+    conn.close()
+    if not rows:
+        return jsonify({"last_active": None, "recent_apps": [], "count": 0})
+    last_active = rows[0]["opened_at"]
+    recent_apps = list(dict.fromkeys(r["app_name"] for r in rows[:10]))
+    return jsonify({"last_active": last_active, "recent_apps": recent_apps, "count": len(rows)})
+
+
+@app.route("/ping", methods=["GET"])
+def ping():
+    return jsonify({"status": "ok"})
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
