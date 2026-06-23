@@ -1,4 +1,4 @@
-  import os
+mport os
   import sqlite3
   from datetime import datetime, timezone, timedelta
   from flask import Flask, request, jsonify
@@ -7,6 +7,7 @@
   CST = timezone(timedelta(hours=8))
   EXPECTED_TOKEN = os.environ.get("REPORT_TOKEN", "")
   DB_PATH = os.environ.get("DATA_DIR", "/tmp") + "/activity.db"
+
 
   def get_db():
       conn = sqlite3.connect(DB_PATH)
@@ -20,6 +21,7 @@
       """)
       return conn
 
+
   def require_token():
       if not EXPECTED_TOKEN:
           return None
@@ -28,6 +30,7 @@
       if token != EXPECTED_TOKEN:
           return jsonify({"error": "unauthorized"}), 401
       return None
+
 
   @app.route("/report", methods=["POST"])
   def report():
@@ -38,12 +41,20 @@
       app_name = data.get("app_name") or data.get("app") or "unknown"
       now = datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S")
       conn = get_db()
-      conn.execute("INSERT INTO phone_activity (app_name, opened_at) VALUES (?, ?)", (app_name, now))
-      conn.execute("""DELETE FROM phone_activity WHERE id NOT IN (SELECT id FROM phone_activity ORDER BY opened_at DESC LIMIT
-  100)""")
+      conn.execute(
+          "INSERT INTO phone_activity (app_name, opened_at) VALUES (?, ?)",
+          (app_name, now),
+      )
+      conn.execute("""
+          DELETE FROM phone_activity
+          WHERE id NOT IN (
+              SELECT id FROM phone_activity ORDER BY opened_at DESC LIMIT 100
+          )
+      """)
       conn.commit()
       conn.close()
       return jsonify({"status": "ok"})
+
 
   @app.route("/activity", methods=["GET"])
   def activity():
@@ -51,9 +62,12 @@
       if err:
           return err
       conn = get_db()
-      rows = conn.execute("SELECT app_name, opened_at FROM phone_activity ORDER BY opened_at DESC LIMIT 50").fetchall()
+      rows = conn.execute(
+          "SELECT app_name, opened_at FROM phone_activity ORDER BY opened_at DESC LIMIT 50"
+      ).fetchall()
       conn.close()
       return jsonify([{"app": r["app_name"], "time": r["opened_at"]} for r in rows])
+
 
   @app.route("/activity/summary", methods=["GET"])
   def activity_summary():
@@ -61,7 +75,9 @@
       if err:
           return err
       conn = get_db()
-      rows = conn.execute("SELECT app_name, opened_at FROM phone_activity ORDER BY opened_at DESC LIMIT 50").fetchall()
+      rows = conn.execute(
+          "SELECT app_name, opened_at FROM phone_activity ORDER BY opened_at DESC LIMIT 50"
+      ).fetchall()
       conn.close()
       if not rows:
           return jsonify({"last_active": None, "recent_apps": [], "count": 0})
@@ -69,9 +85,11 @@
       recent_apps = list(dict.fromkeys(r["app_name"] for r in rows[:10]))
       return jsonify({"last_active": last_active, "recent_apps": recent_apps, "count": len(rows)})
 
+
   @app.route("/ping", methods=["GET"])
   def ping():
       return jsonify({"status": "ok"})
+
 
   if __name__ == "__main__":
       app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
